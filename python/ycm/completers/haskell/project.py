@@ -1,7 +1,13 @@
+import re
 from ycm.completers.completer_utils import Which, RunCommand
+from functools import partial
+from itertools import takewhile
 
 
-GHC_MOD_BIN = Which('ghc-mod')
+FUNCTION = re.compile( r'^([^\s]+)\s+::\s+(.+)$' )
+TYPECLASS = re.compile( r'^class\s+(.+)$' )
+TYPE = re.compile( r'^(data|type|newtype)\s+(.+)$' )
+GHC_MOD_BIN = Which( 'ghc-mod' )
 
 if not GHC_MOD_BIN:
   raise ImportError(
@@ -15,11 +21,9 @@ class Project( object ):
   projects/modules
   """
 
-  def __init__( self, command_runner=None ):
-    if command_runner:
-      # abstract command runner function for easier testing of this class
-      self._RunCommand = command_runner
-
+  def __init__( self, command_runner=( lambda s, c: RunCommand( c ) ) ):
+    # abstract command runner function for easier testing of this class
+    self._RunCommand = command_runner
     self.RefreshInstalledModules()
 
 
@@ -47,18 +51,14 @@ class Project( object ):
       partial_name = '.'.join(parts[:level])
 
       for module in modules.values():
-        if module.FullyQualifiedName().startswith(partial_name):
+        if str(module).startswith(partial_name):
           if module.real_module:
             rv.append( module )
           Search( module.submodules, level + 1 )
 
     Search( self._installed_modules, 1 )
 
-    return sorted(rv, key=lambda m: m.FullyQualifiedName())
-
-
-  def _RunCommand ( self, cmd ):
-    return RunCommand( cmd )
+    return rv
 
 
   def _AddModule( self, name ):
@@ -72,7 +72,7 @@ class Project( object ):
         head = splitted[0]
 
       if head not in cache:
-        cache[head] = Module( head, parent )
+        cache[head] = Module( head, parent, self._RunCommand )
       if tail:
         Add( cache[head].submodules, tail, cache[head] )
       if name == head:
@@ -84,15 +84,15 @@ class Project( object ):
 class Module( object ):
   """Encapsulates data collected from a haskell module"""
 
-  def __init__( self, name, parent ):
+  def __init__( self, name, parent, command_runner ):
     self.name = name
     self.parent = parent
+    self._RunCommand = command_runner
     self.real_module = False
     self.submodules = {}
-    self.symbols = {}
 
 
-  def FullyQualifiedName( self ):
+  def __str__( self ):
     def Name( module ):
       rv = ''
       if module.parent:
@@ -102,9 +102,51 @@ class Module( object ):
     return Name( self )
 
 
+  def QuerySymbols( self, prefix ):
+    output = self._RunCommand( [ 'ghc-mod', 'browse', '-d', str(self) ] )
+    toSymbol = partial( map, lambda l: Symbol( l, self ) )
+    matching = partial( filter, lambda x: x.name.startswith( prefix ) )
+    noReturnCode = partial( takewhile, lambda x: isinstance( x, str ) )
+
+    return matching( toSymbol( noReturnCode( output ) ) )
+
+
+
 class Symbol(object):
   """Encapsulates a function, datatype or typeclass"""
 
-  def __init__( self, name, type ):
-    self._name = name
-    self._type = type
+  def __init__( self, raw, module ):
+    self.module = module
+
+    m = FUNCTION.match( raw )
+    if m:
+      self.type = 'function'
+      self.name = m.group( 1 )
+      self.signature = m.group( 2 )
+      return
+
+    m = TYPECLASS.match( raw )
+    if m:
+      self.type = 'class'
+      self.name = m.group( 1 )
+      return
+
+    m = TYPE.match( raw )
+    if m:
+      self.type = 'type'
+      self.kind = m.group( 1 )
+      self.name = m.group( 2 )
+      return
+
+    raise Exception( 'Unrecognized symbol %s' % raw )
+
+
+  def __str__( self ):
+    if self.type == 'function':
+      return '%s :: %s' % (self.name, self.signature,)
+    elif self.type == 'class':
+      return '%s (class)' % self.name
+    elif self.type == 'type':
+      return '%s (%s)' % (self.name, self.kind,)
+
+
