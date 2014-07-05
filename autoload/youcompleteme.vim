@@ -19,6 +19,11 @@
 let s:save_cpo = &cpo
 set cpo&vim
 
+let s:is_nvim = has('neovim')
+if s:is_nvim
+  let s:channel_id = pyeval('vim.channel_id')
+endif
+
 " This needs to be called outside of a function
 let s:script_folder_path = escape( expand( '<sfile>:p:h' ), '\' )
 let s:searched_and_results_found = 0
@@ -46,8 +51,10 @@ function! youcompleteme#Enable()
 
   call s:SetUpBackwardsCompatibility()
 
-  if !s:SetUpPython()
-    return
+  if !s:is_nvim
+    if !s:SetUpPython()
+      return
+    endif
   endif
 
   call s:SetUpCpoptions()
@@ -164,9 +171,13 @@ function! s:SetUpKeyMappings()
       let invoke_key = '<Nul>'
     endif
 
-    " <c-x><c-o> trigger omni completion, <c-p> deselects the first completion
-    " candidate that vim selects by default
-    silent! exe 'inoremap <unique> ' . invoke_key .  ' <C-X><C-O><C-P>'
+    if s:is_nvim
+      silent! exe 'inoremap ' . invoke_key . ' <c-r>=nvim_ycm#BeginCompletion()<cr>'
+    else
+      " <c-x><c-o> trigger omni completion, <c-p> deselects the first
+      " completion candidate that vim selects by default
+      silent! exe 'inoremap <unique> ' . invoke_key .  ' <C-X><C-O><C-P>'
+    endif
   endif
 
   if !empty( g:ycm_key_detailed_diagnostics )
@@ -285,7 +296,7 @@ function! s:SetUpCpoptions()
 
   " This prevents the display of "Pattern not found" & similar messages during
   " completion. This is only available since Vim 7.4.314
-  if pyeval( 'vimsupport.VimVersionAtLeast("7.4.314")' )
+  if !s:is_nvim && pyeval( 'vimsupport.VimVersionAtLeast("7.4.314")' )
     set shortmess+=c
   endif
 endfunction
@@ -328,7 +339,11 @@ endfunction
 
 
 function! s:OnVimLeave()
-  py ycm_state.OnVimLeave()
+  if s:is_nvim
+    call send_event(s:channel_id, 'vim_leave', 0)
+  else
+    py ycm_state.OnVimLeave()
+  endif
 endfunction
 
 
@@ -343,9 +358,18 @@ function! s:OnBufferVisit()
   endif
 
   call s:SetUpCompleteopt()
-  call s:SetCompleteFunc()
-  py ycm_state.OnBufferVisit()
-  call s:OnFileReadyToParse()
+
+  if s:is_nvim
+    let data = {
+          \ 'filetype': &filetype,
+          \ 'filepath': expand('%:p'),
+          \ }
+    call send_event(s:channel_id, 'buffer_visit', data)
+  else
+    call s:SetCompleteFunc()
+    py ycm_state.OnBufferVisit()
+    call s:OnFileReadyToParse()
+  endif
 endfunction
 
 
@@ -354,7 +378,11 @@ function! s:OnBufferUnload( deleted_buffer_file )
     return
   endif
 
-  py ycm_state.OnBufferUnload( vim.eval( 'a:deleted_buffer_file' ) )
+  if s:is_nvim
+    call send_event(s:channel_id, 'buffer_unload', a:deleted_buffer_file)
+  else
+    py ycm_state.OnBufferUnload( vim.eval( 'a:deleted_buffer_file' ) )
+  endif
 endfunction
 
 
@@ -364,7 +392,9 @@ function! s:OnCursorHold()
   endif
 
   call s:SetUpCompleteopt()
-  call s:OnFileReadyToParse()
+  if !s:is_nvim
+    call s:OnFileReadyToParse()
+  endif
 endfunction
 
 
@@ -410,7 +440,10 @@ function! s:OnCursorMovedInsertMode()
     return
   endif
 
-  py ycm_state.OnCursorMoved()
+  if !s:is_nvim
+    py ycm_state.OnCursorMoved()
+  endif
+
   call s:UpdateCursorMoved()
 
   " Basically, we need to only trigger the completion menu when the user has
@@ -430,13 +463,17 @@ function! s:OnCursorMovedInsertMode()
   endif
 
   if g:ycm_auto_trigger || s:omnifunc_mode
-    call s:InvokeCompletion()
+    if s:is_nvim
+      call nvim_ycm#BeginCompletion()
+    else
+      call s:InvokeCompletion()
+    endif
   endif
 
   " We have to make sure we correctly leave omnifunc mode even when the user
   " inserts something like a "operator[]" candidate string which fails
   " CurrentIdentifierFinished check.
-  if s:omnifunc_mode && !pyeval( 'base.LastEnteredCharIsIdentifierChar()')
+  if !s:is_nvim && s:omnifunc_mode && !pyeval( 'base.LastEnteredCharIsIdentifierChar()')
     let s:omnifunc_mode = 0
   endif
 endfunction
@@ -447,8 +484,12 @@ function! s:OnCursorMovedNormalMode()
     return
   endif
 
-  call s:OnFileReadyToParse()
-  py ycm_state.OnCursorMoved()
+  if s:is_nvim
+    call nvim_ycm#BeginCompilation()
+  else
+    call s:OnFileReadyToParse()
+    py ycm_state.OnCursorMoved()
+  endif
 endfunction
 
 
@@ -458,8 +499,14 @@ function! s:OnInsertLeave()
   endif
 
   let s:omnifunc_mode = 0
-  call s:OnFileReadyToParse()
-  py ycm_state.OnInsertLeave()
+
+  if s:is_nvim
+    call nvim_ycm#BeginCompilation()
+  else
+    call s:OnFileReadyToParse()
+    py ycm_state.OnInsertLeave()
+  endif
+
   if g:ycm_autoclose_preview_window_after_completion ||
         \ g:ycm_autoclose_preview_window_after_insertion
     call s:ClosePreviewWindowIfNeeded()
@@ -540,7 +587,7 @@ endfunction
 
 
 function! s:IdentifierFinishedOperations()
-  if !pyeval( 'base.CurrentIdentifierFinished()' )
+  if s:is_nvim || !pyeval( 'base.CurrentIdentifierFinished()' )
     return
   endif
   py ycm_state.OnCurrentIdentifierFinished()
@@ -618,15 +665,16 @@ endfunction
 
 
 python << EOF
-def GetCompletionsInner():
-  request = ycm_state.GetCurrentCompletionRequest()
-  request.Start()
-  while not request.Done():
-    if bool( int( vim.eval( 'complete_check()' ) ) ):
-      return { 'words' : [], 'refresh' : 'always'}
+if not int(vim.eval('has("neovim")')):
+  def GetCompletionsInner():
+    request = ycm_state.GetCurrentCompletionRequest()
+    request.Start()
+    while not request.Done():
+      if bool( int( vim.eval( 'complete_check()' ) ) ):
+        return { 'words' : [], 'refresh' : 'always'}
 
-  results = base.AdjustCandidateInsertionText( request.Response() )
-  return { 'words' : results, 'refresh' : 'always' }
+    results = base.AdjustCandidateInsertionText( request.Response() )
+    return { 'words' : results, 'refresh' : 'always' }
 EOF
 
 
@@ -763,16 +811,20 @@ function! s:ForceCompile()
   endif
 
   echom "Forcing compilation, this will block Vim until done."
-  py ycm_state.OnFileReadyToParse()
-  while 1
-    let diagnostics_ready = pyeval(
-          \ 'ycm_state.DiagnosticsForCurrentFileReady()' )
-    if diagnostics_ready
-      break
-    endif
+  if s:is_nvim
+    call nvim_ycm#BeginCompilation()
+  else
+    py ycm_state.OnFileReadyToParse()
+    while 1
+      let diagnostics_ready = pyeval(
+            \ 'ycm_state.DiagnosticsForCurrentFileReady()' )
+      if diagnostics_ready
+        break
+      endif
 
-    sleep 100m
-  endwhile
+      sleep 100m
+    endwhile
+  endif
   return 1
 endfunction
 

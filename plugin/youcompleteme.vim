@@ -171,7 +171,12 @@ let g:ycm_goto_buffer_command =
 " startup procedure.
 augroup youcompletemeStart
   autocmd!
-  autocmd VimEnter * call youcompleteme#Enable()
+  if has('neovim')
+    autocmd VimEnter * call nvim_ycm#Enable()
+  else
+    autocmd VimEnter * call youcompleteme#Enable()
+  endif
+
 augroup END
 
 " This is basic vim plugin boilerplate
